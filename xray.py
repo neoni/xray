@@ -547,7 +547,7 @@ class xray_hooks_t(ida_hexrays.Hexrays_Hooks):
         line = re.sub(r'(?<=[^ ])([ ]{2})(?=[^ ]|$)', ' ', line) # replace two space
         return line
 
-    def double_click(self, vu, shift_state):
+    def right_click(self, vu):
         if vu.get_current_item(USE_MOUSE):
             item = None
             cit = vu.item.citype
