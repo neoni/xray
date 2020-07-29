@@ -478,39 +478,74 @@ class xray_hooks_t(ida_hexrays.Hexrays_Hooks):
             COLOR_VARS.append(item)
         refresh_idaview_anyway()
 
+    def _contains_item(self, pc, items, remove=False):
+        for sl in pc:
+            line = self._strip_line(sl.line)
+            s = ''.join(items)
+            count = line.count(s)
+            if count <= 0:
+                continue
+            #print(count, line)
+            start = 0
+            fact = 0
+            for i in range(13):  # max 13 times to try to match
+                if fact == count:
+                    continue # find all arguments
+                pos = len(sl.line)
+                found = True
+                pos = sl.line.find(items[-1], start, pos)
+                old_start = start
+                start = pos + 1
+                if pos < 0 or (pos+len(items[-1])<len(sl.line) and sl.line[pos+len(items[-1])].isalnum()) or \
+                    ((pos-1) >= 0 and sl.line[pos-1].isalnum()):
+                    continue
+                for item in items[-2::-1]:
+                    pos = sl.line.rfind(item, old_start, pos)
+                    if pos < 0 or (pos+len(item)<len(sl.line) and sl.line[pos+len(item)].isalnum()) or \
+                        ((pos-1) >= 0 and sl.line[pos-1].isalnum()):
+                        found = False
+                        break
+                if found:
+                    fact += 1
+                    for item in items:
+                        pos = sl.line.find(item, pos, start)
+                        if pos+len(item)==len(sl.line) or not sl.line[pos+len(item)].isalnum() or pos - 1 < 0 or not sl.line[pos-1].isalnum():
+                            if remove:
+                                sl.line = sl.line[:pos-2] + item + sl.line[pos+len(item)+2:]
+                                start -= 4
+                            else:
+                                sl.line = sl.line[:pos] + ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR) + sl.line[pos+len(item):]
+                                pos += len(ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR))
+                                start += 4
+                        elif pos < 0:
+                            continue
+                        else:
+                            pos += 1
+
+
     def _color_mem(self, vu, items):
         global COLOR_MEMS
         if not items:
             return
+        if len(items) == 1:
+            self._color_var(vu, items[0])
+            return
         pc = vu.cfunc.get_pseudocode()
         if items in COLOR_MEMS:
-            for sl in pc:
-                for item in items:
-                    sl.line = sl.line.replace(ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR), item)
+            self._contains_item(pc, items, True)
             COLOR_MEMS.remove(items)
         else:
-            for sl in pc:
-                have = True
-                pos = 0
-                for item in items:
-                    pos = sl.line.find(item, pos)
-                    if pos < 0 or (pos+len(item)<len(sl.line) and sl.line[pos+len(item)].isalnum()) or \
-                        ((pos-1) >= 0 and sl.line[pos-1].isalnum()):
-                        have = False
-                        break
-                    pos += 1
-                if have:
-                    pos = 0
-                    for item in items:
-                        pos = sl.line.find(item, pos)
-                        if pos+len(item)==len(sl.line) or not sl.line[pos+len(item)].isalnum() or pos - 1 < 0 or not sl.line[pos-1].isalnum():
-                            sl.line = sl.line[:pos] + ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR) + sl.line[pos+len(item):]
-                            pos += len(ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR))
-                        else:
-                            pos += 1
+            self._contains_item(pc, items, False)
             COLOR_MEMS.append(items)
 
         refresh_idaview_anyway()
+
+    def _strip_line(self, sline):
+        line = re.sub(r'\(0000............', '', sline)
+        line = ''.join([c for c in line if ord(c) >= 0x20])
+        line = line.replace('[ ', '[').replace(' ]', ']')
+        line = re.sub(r'(?<=[^ ])([ ]{2})(?=[^ ]|$)', ' ', line) # replace two space
+        return line
 
     def double_click(self, vu, shift_state):
         if vu.get_current_item(USE_MOUSE):
@@ -528,23 +563,21 @@ class xray_hooks_t(ida_hexrays.Hexrays_Hooks):
                         self._color_var(vu, item)
                 else:
                     sl = vu.cfunc.get_pseudocode()[vu.cpos.lnnum]
-                    line = re.sub(r'\(0000............', '', sl.line)
-                    line = ''.join([c for c in line if ord(c) >= 0x20])
-                    line = line.replace('[ ', '[').replace(' ]', ']')
-                    line = re.sub(r'(?<=[^ ])([ ]{2})(?=[^ ]|$)', ' ', line) # replace two space
+                    line = self._strip_line(sl.line)
                     items = []
                     x = vu.cpos.x # maybe inaccuracy
                     while x < len(line) and ((not line[x].isalnum()) and (line[x] not in ['[', '_', ' '])):
                         x += 1
                     if x >= len(line):
                         return 0
-                    print(x)
+                    #print(sl.line)
+                    #print(x)
+                    #print(line)
                     tmp = line[x]
                     for i in range(x-1, -1, -1):
                         if not line[i].isalnum() and line[i] is not '_':
                             break
                         tmp = line[i] + tmp
-                    print(line)
                     for i in range(x+1, len(line)):
                         if line[i] is ' ':
                             if tmp:
@@ -561,13 +594,26 @@ class xray_hooks_t(ida_hexrays.Hexrays_Hooks):
                             if '[' in items:
                                 items.append(line[i])
                             break
+                        elif line[i] is '-':
+                            if tmp:
+                                items.append(tmp)
+                            if line[i+1] is '>':
+                                tmp = '-'
+                            else:
+                                break
+                        elif line[i] is '>':
+                            if tmp is '-':
+                                tmp = ''
+                                items.append('->')
+                            else:
+                                break
                         elif line[i].isalnum() or line[i] is '_':
                             tmp = tmp + line[i]
                         else:
                             if tmp:
                                 items.append(tmp)
                             break
-                    print(items)
+                    #print(items)
                     self._color_mem(vu, items)
         return 0
 
