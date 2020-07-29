@@ -6,6 +6,9 @@ import ida_idaapi
 import ida_kernwin as kw
 import ida_lines as il
 import ida_diskio
+from idaapi import *
+import ida_lines
+import re
 
 __author__ = "Dennis Elser"
 
@@ -14,11 +17,15 @@ PLUGIN_NAME = "xray"
 XRAY_FILTER_ACTION_ID = "%s:filter" % PLUGIN_NAME
 XRAY_LOADCFG_ACTION_ID = "%s:loadcfg" % PLUGIN_NAME
 XRAY_QUERY_ACTION_ID = "%s:query" % PLUGIN_NAME
+XRAY_COLOR_ACTION_ID = "%s:color" % PLUGIN_NAME
 PATTERN_LIST = []
 HIGH_CONTRAST = False
 
 DO_FILTER = False
 TEXT_INPUT_FORMS = {}
+
+COLOR_VARS = []
+COLOR_MEMS = []
 
 CFG_FILENAME = "%s.cfg" % PLUGIN_NAME
 DEFAULT_CFG = """# configuration file for xray.py
@@ -26,7 +33,7 @@ DEFAULT_CFG = """# configuration file for xray.py
 [global]
 # set to 1 for better contrast
 high_contrast=0
-# enable xray by default 
+# enable xray by default
 auto_enable=1
 
 # each group contains a list of regular
@@ -321,7 +328,7 @@ class TextInputForm(kw.Form):
                 self.options |= TextInputForm.SO_FIND_REGEX
             else:
                 self.options &= ~TextInputForm.SO_FIND_REGEX & 0xFFFFFFFF
-        
+
         self._commit_changes()
         return 1
 
@@ -446,6 +453,124 @@ class xray_hooks_t(ida_hexrays.Hexrays_Hooks):
                 return (hint, len(hint_lines)+1)
         return None
 
+    def _color_var(self, vu, item):
+        global COLOR_VARS
+        if not item:
+            return
+        pc = vu.cfunc.get_pseudocode()
+        if item in COLOR_VARS:
+            for sl in pc:
+                sl.line = sl.line.replace(ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR), item)
+            COLOR_VARS.remove(item)
+        else:
+            for sl in pc:
+                pos = 0
+                while True:
+                    pos = sl.line.find(item, pos)
+                    if pos < 0:
+                        break
+                    if not sl.line[pos+len(item)].isalnum():
+                        sl.line = sl.line[:pos] + ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR) + sl.line[pos+len(item):]
+                        pos += len(ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR))
+                    else:
+                        pos += 1
+                # sl.line = sl.line.replace(item, ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR))
+            COLOR_VARS.append(item)
+        refresh_idaview_anyway()
+
+    def _color_mem(self, vu, items):
+        global COLOR_MEMS
+        if not items:
+            return
+        pc = vu.cfunc.get_pseudocode()
+        if items in COLOR_MEMS:
+            for sl in pc:
+                for item in items:
+                    sl.line = sl.line.replace(ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR), item)
+            COLOR_MEMS.remove(items)
+        else:
+            for sl in pc:
+                have = True
+                pos = 0
+                for item in items:
+                    pos = sl.line.find(item, pos)
+                    if pos < 0 or (pos+len(item)<len(sl.line) and sl.line[pos+len(item)].isalnum()) or \
+                        ((pos-1) >= 0 and sl.line[pos-1].isalnum()):
+                        have = False
+                        break
+                    pos += 1
+                if have:
+                    pos = 0
+                    for item in items:
+                        pos = sl.line.find(item, pos)
+                        if pos+len(item)==len(sl.line) or not sl.line[pos+len(item)].isalnum() or pos - 1 < 0 or not sl.line[pos-1].isalnum():
+                            sl.line = sl.line[:pos] + ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR) + sl.line[pos+len(item):]
+                            pos += len(ida_lines.COLSTR(item, ida_lines.SCOLOR_ERROR))
+                        else:
+                            pos += 1
+            COLOR_MEMS.append(items)
+
+        refresh_idaview_anyway()
+
+    def double_click(self, vu, shift_state):
+        if vu.get_current_item(USE_MOUSE):
+            item = None
+            cit = vu.item.citype
+            if cit == VDI_LVAR:
+                item = vu.item.l.name
+                self._color_var(vu, item)
+            elif cit == VDI_EXPR:
+                if vu.item.e.v:
+                    lvars = vu.cfunc.get_lvars()
+                    var = lvars[vu.item.e.v.idx]
+                    if var:
+                        item = var.name
+                        self._color_var(vu, item)
+                else:
+                    sl = vu.cfunc.get_pseudocode()[vu.cpos.lnnum]
+                    line = re.sub(r'\(0000............', '', sl.line)
+                    line = ''.join([c for c in line if ord(c) >= 0x20])
+                    line = line.replace('[ ', '[').replace(' ]', ']')
+                    line = re.sub(r'(?<=[^ ])([ ]{2})(?=[^ ]|$)', ' ', line) # replace two space
+                    items = []
+                    x = vu.cpos.x # maybe inaccuracy
+                    while x < len(line) and ((not line[x].isalnum()) and (line[x] not in ['[', '_', ' '])):
+                        x += 1
+                    if x >= len(line):
+                        return 0
+                    print(x)
+                    tmp = line[x]
+                    for i in range(x-1, -1, -1):
+                        if not line[i].isalnum() and line[i] is not '_':
+                            break
+                        tmp = line[i] + tmp
+                    print(line)
+                    for i in range(x+1, len(line)):
+                        if line[i] is ' ':
+                            if tmp:
+                                items.append(tmp)
+                                tmp = ''
+                        elif line[i] is '[':
+                            if tmp:
+                                items.append(tmp)
+                                tmp = ''
+                            items.append(line[i])
+                        elif line[i] is ']':
+                            if tmp:
+                                items.append(tmp)
+                            if '[' in items:
+                                items.append(line[i])
+                            break
+                        elif line[i].isalnum() or line[i] is '_':
+                            tmp = tmp + line[i]
+                        else:
+                            if tmp:
+                                items.append(tmp)
+                            break
+                    print(items)
+                    self._color_mem(vu, items)
+        return 0
+
     def text_ready(self, vu):
         pc = vu.cfunc.get_pseudocode()
         self._apply_query_filter(vu, pc)
@@ -456,6 +581,7 @@ class xray_hooks_t(ida_hexrays.Hexrays_Hooks):
         kw.attach_action_to_popup(vu.ct, None, XRAY_FILTER_ACTION_ID, PLUGIN_NAME+"/")
         kw.attach_action_to_popup(vu.ct, None, XRAY_LOADCFG_ACTION_ID, PLUGIN_NAME+"/")
         kw.attach_action_to_popup(vu.ct, None, XRAY_QUERY_ACTION_ID, PLUGIN_NAME+"/")
+        kw.attach_action_to_popup(vu.ct, None, XRAY_COLOR_ACTION_ID, PLUGIN_NAME+"/")
         return 0
 
     def create_hint(self, vu):
@@ -578,6 +704,21 @@ class regexfilter_action_handler_t(kw.action_handler_t):
             kw.AST_DISABLE_FOR_WIDGET
 
 # -----------------------------------------------------------------------------
+class color_action_handler_t(kw.action_handler_t):
+    """action handler for marking multiple items"""
+    def __init__(self):
+        kw.action_handler_t.__init__(self)
+
+    def activate(self, ctx):
+        pass
+
+    def update(self, ctx):
+        return kw.AST_ENABLE_FOR_WIDGET if \
+            ctx.widget_type == kw.BWN_PSEUDOCODE else \
+            kw.AST_DISABLE_FOR_WIDGET
+
+
+# -----------------------------------------------------------------------------
 class xray_plugin_t(ida_idaapi.plugin_t):
     """plugin class."""
     flags = ida_idaapi.PLUGIN_HIDE
@@ -615,6 +756,13 @@ class xray_plugin_t(ida_idaapi.plugin_t):
                 regexfilter_action_handler_t(),
                 "Ctrl-F"))
 
+        kw.register_action(
+            kw.action_desc_t(
+            XRAY_COLOR_ACTION_ID,
+            "%s: color" % PLUGIN_NAME,
+            color_action_handler_t(),
+            "Alt-Q"))
+
         self.xray_hooks = xray_hooks_t()
         self.xray_hooks.hook()
         return ida_idaapi.PLUGIN_KEEP
@@ -628,6 +776,7 @@ class xray_plugin_t(ida_idaapi.plugin_t):
             kw.unregister_action(XRAY_FILTER_ACTION_ID)
             kw.unregister_action(XRAY_LOADCFG_ACTION_ID)
             kw.unregister_action(XRAY_QUERY_ACTION_ID)
+            kw.unregister_action(XRAY_COLOR_ACTION_ID)
         return
 
 # -----------------------------------------------------------------------------
